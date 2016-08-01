@@ -159,8 +159,8 @@ def actr(data,yxguess,asym_rad=8,asym_size=5,maxcounts=2,method='gaus',half_pix=
     if data.dtype != 'float64':
         data = data.astype('float64')
 
-    x_guess = yxguess[1]
-    y_guess = yxguess[0]
+    x_guess = int(yxguess[1])
+    y_guess = int(yxguess[0])
 
     #create the array indexes
     ny,nx = np.indices((data.shape))
@@ -348,6 +348,3 @@ def tactr(data,yxguess,asym_rad=8,asym_size=5,maxcounts=2,method='gaus',half_pix
             temp = yxguess
             break
     return temp
-
-
-
