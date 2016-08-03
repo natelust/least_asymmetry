@@ -5,7 +5,6 @@
 import numpy as np
 from scipy import optimize
 from numpy import sum
-#from uwv import var
 from scipy.ndimage.interpolation import map_coordinates
 from make_asym import make_asym_func as make_asym
 
@@ -72,11 +71,13 @@ def col(data,weights=False):
 #uncomment this if you want a pure python implementation of the code
 #and comment out the make asym import up top to exclude the c-python
 #extension
-#def make_asym(data,dis,weights):
+#def make_asym(data,weights, wtruth):
     # This function generates the asym value associated a given frame and distance array (aka raidail profile)
     # It is intended to be used entirely internally and never called from the outside
     # it implements sum of the variance squared at a given radius times the number of points at that radius
- #   assert data.shape == dis.shape
+ #   yind, xind = np.indicies(data.shape)
+ #   center = (data.shape[0]-1)/2
+ #   dis = ((yind-center)**2 + (xind-center)**2)**0.5
  #   temp = map(lambda r: (var(data[dis == r],\
  #                                      weights[dis ==r])),dis.flatten())
     #temp = []
@@ -169,12 +170,6 @@ def actr(data,yxguess,asym_rad=8,asym_size=5,maxcounts=2,method='gaus',half_pix=
     #create the array indexes
     ny,nx = np.indices((data.shape))
 
-    #create the indices for the radial profile
-    ryind, rxind = np.indices((asym_rad*2+1,asym_rad*2+1))
-
-    #for the course pixel asym location we will reuse the same radial profile, generate that now
-    dis = ((ryind-asym_rad)**2+(rxind-asym_rad)**2)**0.5
-
     #make the view for the positions to calculate an asymmetry value, this may be unneeded look at removing
     #this for optimization, save the shape for later shape restoration
 
@@ -210,14 +205,11 @@ def actr(data,yxguess,asym_rad=8,asym_size=5,maxcounts=2,method='gaus',half_pix=
         # create a generator for the view on the weights ahead of time
         lb_views = (view_maker(weights,suby[i],subx[i],asym_rad) for i in itterator)
 
-        # create a generator to duplicate the distance array the required number of times for the map function
-        dis_dup = (dis *i for i in ones_len)
-
         #greate a generator duplicate for the state of w_truth
         w_truth_dup = (w_truth*1 for i in ones_len)
 
         # now create the actual asym array
-        asym = np.array(map(make_asym,views,dis_dup,lb_views,w_truth_dup))
+        asym = np.array(map(make_asym,views,lb_views,w_truth_dup))
 
         # need to find out if the minimum is in the center of the array if it is, break
 
@@ -230,7 +222,7 @@ def actr(data,yxguess,asym_rad=8,asym_size=5,maxcounts=2,method='gaus',half_pix=
             suby    += (suby[asym.argmin()]-y_guess)
             subx    += (subx[asym.argmin()]-x_guess)
             counter += 1
-            del views,dis_dup,asym
+            del views,asym
 
     if counter <= maxcounts:
         # now we must find the sub pixel persision and related options
@@ -241,9 +233,6 @@ def actr(data,yxguess,asym_rad=8,asym_size=5,maxcounts=2,method='gaus',half_pix=
 
         # set a constant used in the center calculation, it is one if half_pix is unset, it becomes 2 if it is set
         divisor = 1.0
-
-        #set a center offset, this is zero normally, but is set to a non zero value if the array is zoomed.
-        zoffset = 0
 
         # This gives the option to include the half pixel values
         if half_pix:
@@ -257,46 +246,52 @@ def actr(data,yxguess,asym_rad=8,asym_size=5,maxcounts=2,method='gaus',half_pix=
             # Now create all of the edges, this represnts the upper right box in the 4x4, or the edges between
             # pixels going to the right.
 
-            # make the new distance array
-            dis = ((ryind-asym_rad)**2+(rxind-(asym_rad+0.5))**2)**0.5
-
             # create the generator for the views
             views = (view_maker(data,suby[i],subx[i],asym_rad) for i in itterator)
 
-            # create the generator to duplicate the distance array
-            dis_dup = (dis *i for i in ones_len)
+            # create a generator for the view on the weights ahead of time
+            lb_views = (view_maker(weights,suby[i],subx[i],asym_rad) for i in itterator)
+
+            # greate a generator duplicate for the state of w_truth
+            w_truth_dup = (w_truth*1 for i in ones_len)
 
             # generate the asymmetry values and save them
-            new_asym[::2,1::2] = np.array(map(make_asym,views,dis_dup)).reshape(new_asym[::2,1::2].shape)
+            new_asym[::2,1::2] = np.array(map(make_asym,views,
+                                              lb_view, w_truth_dup))\
+                .reshape(new_asym[::2,1::2].shape)
 
             # create all of the bottoms, representing the lower left box in 4x4, the edge between pixels going
             # down
 
-            # make the new distance array
-            dis = ((ryind-(asym_rad+0.5))**2+(rxind-asym_rad)**2)**0.5
-
             # create the generator for the views
             views = (view_maker(data,suby[i],subx[i],asym_rad) for i in itterator)
 
-            # create the generator to duplicate the distance array
-            dis_dup = (dis *i for i in ones_len)
+            # create a generator for the view on the weights ahead of time
+            lb_views = (view_maker(weights,suby[i],subx[i],asym_rad) for i in itterator)
+
+            # greate a generator duplicate for the state of w_truth
+            w_truth_dup = (w_truth*1 for i in ones_len)
 
             # generate the asymmetry values and save them
-            new_asym[1::2,::2] = np.array(map(make_asym,views,dis_dup)).reshape(new_asym[1::2,::2].shape)
+            new_asym[1::2,::2] = np.array(map(make_asym,views,
+                                              lb_views, w_truth_dup))\
+                .reshape(new_asym[1::2,::2].shape)
 
             # create all of the corners, like above
 
-            # make the new distance array
-            dis = ((ryind-(asym_rad+0.5))**2+(rxind-(asym_rad+0.5))**2)**0.5
-
             # create the generator for the views
             views = (view_maker(data,suby[i],subx[i],asym_rad) for i in itterator)
 
-            # create the generator to duplicate the distance array
-            dis_dup = (dis *i for i in ones_len)
+            # create a generator for the view on the weights ahead of time
+            lb_views = (view_maker(weights,suby[i],subx[i],asym_rad) for i in itterator)
+
+            # greate a generator duplicate for the state of w_truth
+            w_truth_dup = (w_truth*1 for i in ones_len)
 
             # generate the asymmetry values and save them
-            new_asym[1::2,1::2] = np.array(map(make_asym,views,dis_dup)).reshape(new_asym[1::2,1::2].shape)
+            new_asym[1::2,1::2] = np.array(map(make_asym,views, lb_views,
+                                               w_truth_dup))\
+                .reshape(new_asym[1::2,1::2].shape)
 
             # set the new_asym to the old one
             asym = new_asym
