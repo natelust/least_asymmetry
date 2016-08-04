@@ -126,7 +126,14 @@ PyInit_make_asym(void)
 #else
 #define INITERROR return
 
-void
+#if PY_MAJOR_VERSION >= 3
+#define NUMPY_IMPORT_ARRAY_RETURN_TYPE int
+#else
+#define NUMPY_IMPORT_ARRAY_RETURN_TYPE void
+
+#endif
+
+NUMPY_IMPORT_ARRAY_RETURN_TYPE
 initmake_asym(void)
 {
   import_array();
