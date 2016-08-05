@@ -21,6 +21,6 @@ setup(
     version='0.1',
     author='Nate Lust',
     author_email='nlust@astro.princeton.edu',
-    description='A python extension module for calculating asymmetry values',
+    description='A module for calculating centers though least asymmetry',
     ext_modules=ext_modules,
 )
