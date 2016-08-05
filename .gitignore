@@ -2,3 +2,7 @@
 __pycache__/
 build/
 *.so
+*.aux
+.latex/
+*synctex.gz
+docs/*.log
