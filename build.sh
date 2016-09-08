@@ -15,6 +15,7 @@ fi
 
 
 python setup.py build_ext --inplace
+mv make_asym.so least_asymmetry
 #rm -r build/
 python unit_test.py
 echo "~~You made it!~~"
