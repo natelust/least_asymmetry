@@ -8,7 +8,7 @@ cpp_args = ['-std=c++11', '-stdlib=libc++', '-mmacosx-version-min=10.7']
 
 ext_modules = [
     Extension(
-        'make_asym',
+        'least_asymmetry.make_asym',
         ['least_asymmetry/make_asym.cc'],
         include_dirs=['least_asymmetry/include'],
         language='c++',
