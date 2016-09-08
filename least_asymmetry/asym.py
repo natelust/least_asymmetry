@@ -6,7 +6,7 @@ import numpy as np
 from scipy import optimize
 from numpy import sum
 from scipy.ndimage.interpolation import map_coordinates
-from make_asym import make_asym_func as make_asym
+from .make_asym import make_asym_func as make_asym
 
 
 def gaussian(height, center_x, center_y, width_x, width_y, offset):
@@ -51,7 +51,7 @@ def fitgaussian(data, weights=False):
     the gaussian parameters of a 2D distribution found by a fit
     Weights must be the same size as the data, but every point
     contains the value of the weight of the pixel"""
-    if isinstance(type(weights), type(False)):
+    if isinstance(weights, type(False)):
         weights = np.ones(data.shape, dtype=float)
     elif weights.dtype != np.dtype('float'):
         weights = np.array(weights, dtype=float)
@@ -183,7 +183,7 @@ def actr(data, yxguess, asym_rad=8, asym_size=5, maxcounts=2, method='gaus',
     # larger contrast when using weights
     w_truth = 1
     # create the weights array if one is not passed in, and set w_truth to 0
-    if isinstance(type(weights), type(False)):
+    if isinstance(weights, type(False)):
         weights = np.ones(data.shape, dtype=float)
         w_truth = 0
     elif weights.dtype != np.dtype('float'):
@@ -245,7 +245,7 @@ def actr(data, yxguess, asym_rad=8, asym_size=5, maxcounts=2, method='gaus',
         w_truth_dup = (w_truth*1 for i in ones_len)
 
         # now create the actual asym array
-        asym = np.array(map(make_asym, views, lb_views, w_truth_dup))
+        asym = np.array(list(map(make_asym, views, lb_views, w_truth_dup)))
 
         # need to find out if the minimum is in the center of the array if it
         # is, break

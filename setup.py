@@ -8,19 +8,20 @@ cpp_args = ['-std=c++11', '-stdlib=libc++', '-mmacosx-version-min=10.7']
 
 ext_modules = [
     Extension(
-        'make_asym',
-        ['make_asym.cc'],
-        include_dirs=['include'],
+        'least_asymmetry.make_asym',
+        ['least_asymmetry/make_asym.cc'],
+        include_dirs=['least_asymmetry/include'],
         language='c++',
         extra_compile_args=cpp_args,
     ),
 ]
 
 setup(
-    name='make_asym',
+    name='least_asymmetry',
     version='0.1',
     author='Nate Lust',
     author_email='nlust@astro.princeton.edu',
     description='A module for calculating centers though least asymmetry',
+    packages = ['least_asymmetry'],
     ext_modules=ext_modules,
 )

@@ -1,1 +1,0 @@
-from asym.py import *

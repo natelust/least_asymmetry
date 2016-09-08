@@ -14,7 +14,7 @@ then
 fi
 
 
-python setup.py build_ext --inplace
+python setup.py build_ext --inplace 
 #rm -r build/
 python unit_test.py
 echo "~~You made it!~~"

@@ -3,7 +3,7 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 import unittest
-import asym as a
+import least_asymmetry.asym as a
 import numpy as np
 
 class LeastAsymmetryUnitTest(unittest.TestCase):
