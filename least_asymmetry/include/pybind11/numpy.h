@@ -13,130 +13,471 @@
 #include "complex.h"
 #include <numeric>
 #include <algorithm>
+#include <array>
+#include <cstdlib>
+#include <cstring>
+#include <sstream>
+#include <string>
+#include <initializer_list>
+#include <functional>
 
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable: 4127) // warning C4127: Conditional expression is constant
 #endif
 
+/* This will be true on all flat address space platforms and allows us to reduce the
+   whole npy_intp / size_t / Py_intptr_t business down to just size_t for all size
+   and dimension types (e.g. shape, strides, indexing), instead of inflicting this
+   upon the library user. */
+static_assert(sizeof(size_t) == sizeof(Py_intptr_t), "size_t != Py_intptr_t");
+
 NAMESPACE_BEGIN(pybind11)
-namespace detail { template <typename type, typename SFINAE = void> struct npy_format_descriptor { }; }
+NAMESPACE_BEGIN(detail)
+template <typename type, typename SFINAE = void> struct npy_format_descriptor { };
+template <typename type> struct is_pod_struct;
+
+struct PyArrayDescr_Proxy {
+    PyObject_HEAD
+    PyObject *typeobj;
+    char kind;
+    char type;
+    char byteorder;
+    char flags;
+    int type_num;
+    int elsize;
+    int alignment;
+    char *subarray;
+    PyObject *fields;
+    PyObject *names;
+};
+
+struct PyArray_Proxy {
+    PyObject_HEAD
+    char *data;
+    int nd;
+    ssize_t *dimensions;
+    ssize_t *strides;
+    PyObject *base;
+    PyObject *descr;
+    int flags;
+};
+
+struct npy_api {
+    enum constants {
+        NPY_C_CONTIGUOUS_ = 0x0001,
+        NPY_F_CONTIGUOUS_ = 0x0002,
+        NPY_ARRAY_OWNDATA_ = 0x0004,
+        NPY_ARRAY_FORCECAST_ = 0x0010,
+        NPY_ENSURE_ARRAY_ = 0x0040,
+        NPY_ARRAY_ALIGNED_ = 0x0100,
+        NPY_ARRAY_WRITEABLE_ = 0x0400,
+        NPY_BOOL_ = 0,
+        NPY_BYTE_, NPY_UBYTE_,
+        NPY_SHORT_, NPY_USHORT_,
+        NPY_INT_, NPY_UINT_,
+        NPY_LONG_, NPY_ULONG_,
+        NPY_LONGLONG_, NPY_ULONGLONG_,
+        NPY_FLOAT_, NPY_DOUBLE_, NPY_LONGDOUBLE_,
+        NPY_CFLOAT_, NPY_CDOUBLE_, NPY_CLONGDOUBLE_,
+        NPY_OBJECT_ = 17,
+        NPY_STRING_, NPY_UNICODE_, NPY_VOID_
+    };
+
+    static npy_api& get() {
+        static npy_api api = lookup();
+        return api;
+    }
+
+    bool PyArray_Check_(PyObject *obj) const {
+        return (bool) PyObject_TypeCheck(obj, PyArray_Type_);
+    }
+    bool PyArrayDescr_Check_(PyObject *obj) const {
+        return (bool) PyObject_TypeCheck(obj, PyArrayDescr_Type_);
+    }
+
+    PyObject *(*PyArray_DescrFromType_)(int);
+    PyObject *(*PyArray_NewFromDescr_)
+        (PyTypeObject *, PyObject *, int, Py_intptr_t *,
+         Py_intptr_t *, void *, int, PyObject *);
+    PyObject *(*PyArray_DescrNewFromType_)(int);
+    PyObject *(*PyArray_NewCopy_)(PyObject *, int);
+    PyTypeObject *PyArray_Type_;
+    PyTypeObject *PyArrayDescr_Type_;
+    PyObject *(*PyArray_FromAny_) (PyObject *, PyObject *, int, int, int, PyObject *);
+    int (*PyArray_DescrConverter_) (PyObject *, PyObject **);
+    bool (*PyArray_EquivTypes_) (PyObject *, PyObject *);
+    int (*PyArray_GetArrayParamsFromObject_)(PyObject *, PyObject *, char, PyObject **, int *,
+                                             Py_ssize_t *, PyObject **, PyObject *);
+private:
+    enum functions {
+        API_PyArray_Type = 2,
+        API_PyArrayDescr_Type = 3,
+        API_PyArray_DescrFromType = 45,
+        API_PyArray_FromAny = 69,
+        API_PyArray_NewCopy = 85,
+        API_PyArray_NewFromDescr = 94,
+        API_PyArray_DescrNewFromType = 9,
+        API_PyArray_DescrConverter = 174,
+        API_PyArray_EquivTypes = 182,
+        API_PyArray_GetArrayParamsFromObject = 278,
+    };
+
+    static npy_api lookup() {
+        module m = module::import("numpy.core.multiarray");
+        object c = (object) m.attr("_ARRAY_API");
+#if PY_MAJOR_VERSION >= 3
+        void **api_ptr = (void **) (c ? PyCapsule_GetPointer(c.ptr(), NULL) : nullptr);
+#else
+        void **api_ptr = (void **) (c ? PyCObject_AsVoidPtr(c.ptr()) : nullptr);
+#endif
+        npy_api api;
+#define DECL_NPY_API(Func) api.Func##_ = (decltype(api.Func##_)) api_ptr[API_##Func];
+        DECL_NPY_API(PyArray_Type);
+        DECL_NPY_API(PyArrayDescr_Type);
+        DECL_NPY_API(PyArray_DescrFromType);
+        DECL_NPY_API(PyArray_FromAny);
+        DECL_NPY_API(PyArray_NewCopy);
+        DECL_NPY_API(PyArray_NewFromDescr);
+        DECL_NPY_API(PyArray_DescrNewFromType);
+        DECL_NPY_API(PyArray_DescrConverter);
+        DECL_NPY_API(PyArray_EquivTypes);
+        DECL_NPY_API(PyArray_GetArrayParamsFromObject);
+#undef DECL_NPY_API
+        return api;
+    }
+};
+NAMESPACE_END(detail)
+
+#define PyArray_GET_(ptr, attr) \
+    (reinterpret_cast<::pybind11::detail::PyArray_Proxy*>(ptr)->attr)
+#define PyArrayDescr_GET_(ptr, attr) \
+    (reinterpret_cast<::pybind11::detail::PyArrayDescr_Proxy*>(ptr)->attr)
+#define PyArray_CHKFLAGS_(ptr, flag) \
+    (flag == (reinterpret_cast<::pybind11::detail::PyArray_Proxy*>(ptr)->flags & flag))
+
+class dtype : public object {
+public:
+    PYBIND11_OBJECT_DEFAULT(dtype, object, detail::npy_api::get().PyArrayDescr_Check_);
+
+    dtype(const buffer_info &info) {
+        dtype descr(_dtype_from_pep3118()(PYBIND11_STR_TYPE(info.format)));
+        m_ptr = descr.strip_padding().release().ptr();
+    }
+
+    dtype(std::string format) {
+        m_ptr = from_args(pybind11::str(format)).release().ptr();
+    }
+
+    dtype(const char *format) : dtype(std::string(format)) { }
+
+    dtype(list names, list formats, list offsets, size_t itemsize) {
+        dict args;
+        args["names"] = names;
+        args["formats"] = formats;
+        args["offsets"] = offsets;
+        args["itemsize"] = pybind11::int_(itemsize);
+        m_ptr = from_args(args).release().ptr();
+    }
+
+    static dtype from_args(object args) {
+        // This is essentially the same as calling np.dtype() constructor in Python
+        PyObject *ptr = nullptr;
+        if (!detail::npy_api::get().PyArray_DescrConverter_(args.release().ptr(), &ptr) || !ptr)
+            pybind11_fail("NumPy: failed to create structured dtype");
+        return object(ptr, false);
+    }
+
+    template <typename T> static dtype of() {
+        return detail::npy_format_descriptor<typename std::remove_cv<T>::type>::dtype();
+    }
+
+    size_t itemsize() const {
+        return (size_t) PyArrayDescr_GET_(m_ptr, elsize);
+    }
+
+    bool has_fields() const {
+        return PyArrayDescr_GET_(m_ptr, names) != nullptr;
+    }
+
+    char kind() const {
+        return PyArrayDescr_GET_(m_ptr, kind);
+    }
+
+private:
+    static object _dtype_from_pep3118() {
+        static PyObject *obj = module::import("numpy.core._internal")
+            .attr("_dtype_from_pep3118").cast<object>().release().ptr();
+        return object(obj, true);
+    }
+
+    dtype strip_padding() {
+        // Recursively strip all void fields with empty names that are generated for
+        // padding fields (as of NumPy v1.11).
+        if (!has_fields())
+            return *this;
+
+        struct field_descr { PYBIND11_STR_TYPE name; object format; pybind11::int_ offset; };
+        std::vector<field_descr> field_descriptors;
+
+        auto fields = attr("fields").cast<object>();
+        auto items = fields.attr("items").cast<object>();
+        for (auto field : items()) {
+            auto spec = object(field, true).cast<tuple>();
+            auto name = spec[0].cast<pybind11::str>();
+            auto format = spec[1].cast<tuple>()[0].cast<dtype>();
+            auto offset = spec[1].cast<tuple>()[1].cast<pybind11::int_>();
+            if (!len(name) && format.kind() == 'V')
+                continue;
+            field_descriptors.push_back({(PYBIND11_STR_TYPE) name, format.strip_padding(), offset});
+        }
+
+        std::sort(field_descriptors.begin(), field_descriptors.end(),
+                  [](const field_descr& a, const field_descr& b) {
+                      return a.offset.cast<int>() < b.offset.cast<int>();
+                  });
+
+        list names, formats, offsets;
+        for (auto& descr : field_descriptors) {
+            names.append(descr.name);
+            formats.append(descr.format);
+            offsets.append(descr.offset);
+        }
+        return dtype(names, formats, offsets, itemsize());
+    }
+};
 
 class array : public buffer {
 public:
-    struct API {
-        enum Entries {
-            API_PyArray_Type = 2,
-            API_PyArray_DescrFromType = 45,
-            API_PyArray_FromAny = 69,
-            API_PyArray_NewCopy = 85,
-            API_PyArray_NewFromDescr = 94,
-
-            NPY_C_CONTIGUOUS_ = 0x0001,
-            NPY_F_CONTIGUOUS_ = 0x0002,
-            NPY_ARRAY_FORCECAST_ = 0x0010,
-            NPY_ENSURE_ARRAY_ = 0x0040,
-            NPY_BOOL_ = 0,
-            NPY_BYTE_, NPY_UBYTE_,
-            NPY_SHORT_, NPY_USHORT_,
-            NPY_INT_, NPY_UINT_,
-            NPY_LONG_, NPY_ULONG_,
-            NPY_LONGLONG_, NPY_ULONGLONG_,
-            NPY_FLOAT_, NPY_DOUBLE_, NPY_LONGDOUBLE_,
-            NPY_CFLOAT_, NPY_CDOUBLE_, NPY_CLONGDOUBLE_
-        };
-
-        static API lookup() {
-            module m = module::import("numpy.core.multiarray");
-            object c = (object) m.attr("_ARRAY_API");
-#if PY_MAJOR_VERSION >= 3
-            void **api_ptr = (void **) (c ? PyCapsule_GetPointer(c.ptr(), NULL) : nullptr);
-#else
-            void **api_ptr = (void **) (c ? PyCObject_AsVoidPtr(c.ptr()) : nullptr);
-#endif
-            API api;
-            api.PyArray_Type_          = (decltype(api.PyArray_Type_))          api_ptr[API_PyArray_Type];
-            api.PyArray_DescrFromType_ = (decltype(api.PyArray_DescrFromType_)) api_ptr[API_PyArray_DescrFromType];
-            api.PyArray_FromAny_       = (decltype(api.PyArray_FromAny_))       api_ptr[API_PyArray_FromAny];
-            api.PyArray_NewCopy_       = (decltype(api.PyArray_NewCopy_))       api_ptr[API_PyArray_NewCopy];
-            api.PyArray_NewFromDescr_  = (decltype(api.PyArray_NewFromDescr_))  api_ptr[API_PyArray_NewFromDescr];
-            return api;
-        }
-
-        bool PyArray_Check_(PyObject *obj) const { return (bool) PyObject_TypeCheck(obj, PyArray_Type_); }
-
-        PyObject *(*PyArray_DescrFromType_)(int);
-        PyObject *(*PyArray_NewFromDescr_)
-            (PyTypeObject *, PyObject *, int, Py_intptr_t *,
-             Py_intptr_t *, void *, int, PyObject *);
-        PyObject *(*PyArray_NewCopy_)(PyObject *, int);
-        PyTypeObject *PyArray_Type_;
-        PyObject *(*PyArray_FromAny_) (PyObject *, PyObject *, int, int, int, PyObject *);
-    };
-
-    PYBIND11_OBJECT_DEFAULT(array, buffer, lookup_api().PyArray_Check_)
+    PYBIND11_OBJECT_DEFAULT(array, buffer, detail::npy_api::get().PyArray_Check_)
 
     enum {
-        c_style = API::NPY_C_CONTIGUOUS_,
-        f_style = API::NPY_F_CONTIGUOUS_,
-        forcecast = API::NPY_ARRAY_FORCECAST_
+        c_style = detail::npy_api::NPY_C_CONTIGUOUS_,
+        f_style = detail::npy_api::NPY_F_CONTIGUOUS_,
+        forcecast = detail::npy_api::NPY_ARRAY_FORCECAST_
     };
 
-    template <typename Type> array(size_t size, const Type *ptr) {
-        API& api = lookup_api();
-        PyObject *descr = api.PyArray_DescrFromType_(detail::npy_format_descriptor<Type>::value);
-        if (descr == nullptr)
-            pybind11_fail("NumPy: unsupported buffer format!");
-        Py_intptr_t shape = (Py_intptr_t) size;
-        object tmp = object(api.PyArray_NewFromDescr_(
-            api.PyArray_Type_, descr, 1, &shape, nullptr, (void *) ptr, 0, nullptr), false);
-        if (ptr && tmp)
-            tmp = object(api.PyArray_NewCopy_(tmp.ptr(), -1 /* any order */), false);
+    array(const pybind11::dtype& dt, const std::vector<size_t>& shape,
+          const std::vector<size_t>& strides, const void *ptr = nullptr) {
+        auto& api = detail::npy_api::get();
+        auto ndim = shape.size();
+        if (shape.size() != strides.size())
+            pybind11_fail("NumPy: shape ndim doesn't match strides ndim");
+        auto descr = dt;
+        object tmp(api.PyArray_NewFromDescr_(
+            api.PyArray_Type_, descr.release().ptr(), (int) ndim, (Py_intptr_t *) shape.data(),
+            (Py_intptr_t *) strides.data(), const_cast<void *>(ptr), 0, nullptr), false);
         if (!tmp)
             pybind11_fail("NumPy: unable to create array!");
+        if (ptr)
+            tmp = object(api.PyArray_NewCopy_(tmp.ptr(), -1 /* any order */), false);
         m_ptr = tmp.release().ptr();
     }
 
-    array(const buffer_info &info) {
-        API& api = lookup_api();
-        if ((info.format.size() < 1) || (info.format.size() > 2))
-            pybind11_fail("Unsupported buffer format!");
-        int fmt = (int) info.format[0];
-        if (info.format == "Zd")      fmt = API::NPY_CDOUBLE_;
-        else if (info.format == "Zf") fmt = API::NPY_CFLOAT_;
+    array(const pybind11::dtype& dt, const std::vector<size_t>& shape, const void *ptr = nullptr)
+    : array(dt, shape, default_strides(shape, dt.itemsize()), ptr) { }
 
-        PyObject *descr = api.PyArray_DescrFromType_(fmt);
-        if (descr == nullptr)
-            pybind11_fail("NumPy: unsupported buffer format '" + info.format + "'!");
-        object tmp(api.PyArray_NewFromDescr_(
-            api.PyArray_Type_, descr, (int) info.ndim, (Py_intptr_t *) &info.shape[0],
-            (Py_intptr_t *) &info.strides[0], info.ptr, 0, nullptr), false);
-        if (info.ptr && tmp)
-            tmp = object(api.PyArray_NewCopy_(tmp.ptr(), -1 /* any order */), false);
-        if (!tmp)
-            pybind11_fail("NumPy: unable to create array!");
-        m_ptr = tmp.release().ptr();
+    array(const pybind11::dtype& dt, size_t count, const void *ptr = nullptr)
+    : array(dt, std::vector<size_t> { count }, ptr) { }
+
+    template<typename T> array(const std::vector<size_t>& shape,
+                               const std::vector<size_t>& strides, const T* ptr)
+    : array(pybind11::dtype::of<T>(), shape, strides, (void *) ptr) { }
+
+    template<typename T> array(const std::vector<size_t>& shape, const T* ptr)
+    : array(shape, default_strides(shape, sizeof(T)), ptr) { }
+
+    template<typename T> array(size_t count, const T* ptr)
+    : array(std::vector<size_t> { count }, ptr) { }
+
+    array(const buffer_info &info)
+    : array(pybind11::dtype(info), info.shape, info.strides, info.ptr) { }
+
+    /// Array descriptor (dtype)
+    pybind11::dtype dtype() const {
+        return object(PyArray_GET_(m_ptr, descr), true);
+    }
+
+    /// Total number of elements
+    size_t size() const {
+        return std::accumulate(shape(), shape() + ndim(), (size_t) 1, std::multiplies<size_t>());
+    }
+
+    /// Byte size of a single element
+    size_t itemsize() const {
+        return (size_t) PyArrayDescr_GET_(PyArray_GET_(m_ptr, descr), elsize);
+    }
+
+    /// Total number of bytes
+    size_t nbytes() const {
+        return size() * itemsize();
+    }
+
+    /// Number of dimensions
+    size_t ndim() const {
+        return (size_t) PyArray_GET_(m_ptr, nd);
+    }
+
+    /// Dimensions of the array
+    const size_t* shape() const {
+        return reinterpret_cast<const size_t *>(PyArray_GET_(m_ptr, dimensions));
+    }
+
+    /// Dimension along a given axis
+    size_t shape(size_t dim) const {
+        if (dim >= ndim())
+            fail_dim_check(dim, "invalid axis");
+        return shape()[dim];
+    }
+
+    /// Strides of the array
+    const size_t* strides() const {
+        return reinterpret_cast<const size_t *>(PyArray_GET_(m_ptr, strides));
+    }
+
+    /// Stride along a given axis
+    size_t strides(size_t dim) const {
+        if (dim >= ndim())
+            fail_dim_check(dim, "invalid axis");
+        return strides()[dim];
+    }
+
+    /// If set, the array is writeable (otherwise the buffer is read-only)
+    bool writeable() const {
+        return PyArray_CHKFLAGS_(m_ptr, detail::npy_api::NPY_ARRAY_WRITEABLE_);
+    }
+
+    /// If set, the array owns the data (will be freed when the array is deleted)
+    bool owndata() const {
+        return PyArray_CHKFLAGS_(m_ptr, detail::npy_api::NPY_ARRAY_OWNDATA_);
+    }
+
+    /// Pointer to the contained data. If index is not provided, points to the
+    /// beginning of the buffer. May throw if the index would lead to out of bounds access.
+    template<typename... Ix> const void* data(Ix&&... index) const {
+        return static_cast<const void *>(PyArray_GET_(m_ptr, data) + offset_at(index...));
+    }
+
+    /// Mutable pointer to the contained data. If index is not provided, points to the
+    /// beginning of the buffer. May throw if the index would lead to out of bounds access.
+    /// May throw if the array is not writeable.
+    template<typename... Ix> void* mutable_data(Ix&&... index) {
+        check_writeable();
+        return static_cast<void *>(PyArray_GET_(m_ptr, data) + offset_at(index...));
+    }
+
+    /// Byte offset from beginning of the array to a given index (full or partial).
+    /// May throw if the index would lead to out of bounds access.
+    template<typename... Ix> size_t offset_at(Ix&&... index) const {
+        if (sizeof...(index) > ndim())
+            fail_dim_check(sizeof...(index), "too many indices for an array");
+        return get_byte_offset(index...);
+    }
+
+    size_t offset_at() const { return 0; }
+
+    /// Item count from beginning of the array to a given index (full or partial).
+    /// May throw if the index would lead to out of bounds access.
+    template<typename... Ix> size_t index_at(Ix&&... index) const {
+        return offset_at(index...) / itemsize();
     }
 
 protected:
-    static API &lookup_api() {
-        static API api = API::lookup();
-        return api;
+    template<typename, typename> friend struct detail::npy_format_descriptor;
+
+    void fail_dim_check(size_t dim, const std::string& msg) const {
+        throw index_error(msg + ": " + std::to_string(dim) +
+                          " (ndim = " + std::to_string(ndim()) + ")");
+    }
+
+    template<typename... Ix> size_t get_byte_offset(Ix&&... index) const {
+        const size_t idx[] = { (size_t) index... };
+        if (!std::equal(idx + 0, idx + sizeof...(index), shape(), std::less<size_t>{})) {
+            auto mismatch = std::mismatch(idx + 0, idx + sizeof...(index), shape(), std::less<size_t>{});
+            throw index_error(std::string("index ") + std::to_string(*mismatch.first) +
+                              " is out of bounds for axis " + std::to_string(mismatch.first - idx) +
+                              " with size " + std::to_string(*mismatch.second));
+        }
+        return std::inner_product(idx + 0, idx + sizeof...(index), strides(), (size_t) 0);
+    }
+
+    size_t get_byte_offset() const { return 0; }
+
+    void check_writeable() const {
+        if (!writeable())
+            throw std::runtime_error("array is not writeable");
+    }
+
+    static std::vector<size_t> default_strides(const std::vector<size_t>& shape, size_t itemsize) {
+        auto ndim = shape.size();
+        std::vector<size_t> strides(ndim);
+        if (ndim) {
+            std::fill(strides.begin(), strides.end(), itemsize);
+            for (size_t i = 0; i < ndim - 1; i++)
+                for (size_t j = 0; j < ndim - 1 - i; j++)
+                    strides[j] *= shape[ndim - 1 - i];
+        }
+        return strides;
     }
 };
 
 template <typename T, int ExtraFlags = array::forcecast> class array_t : public array {
 public:
     PYBIND11_OBJECT_CVT(array_t, array, is_non_null, m_ptr = ensure(m_ptr));
+
     array_t() : array() { }
-    array_t(const buffer_info& info) : array(info) {}
+
+    array_t(const buffer_info& info) : array(info) { }
+
+    array_t(const std::vector<size_t>& shape, const std::vector<size_t>& strides, const T* ptr = nullptr)
+    : array(shape, strides, ptr) { }
+
+    array_t(const std::vector<size_t>& shape, const T* ptr = nullptr)
+    : array(shape, ptr) { }
+
+    array_t(size_t count, const T* ptr = nullptr)
+    : array(count, ptr) { }
+
+    constexpr size_t itemsize() const {
+        return sizeof(T);
+    }
+
+    template<typename... Ix> size_t index_at(Ix&... index) const {
+        return offset_at(index...) / itemsize();
+    }
+
+    template<typename... Ix> const T* data(Ix&&... index) const {
+        return static_cast<const T*>(array::data(index...));
+    }
+
+    template<typename... Ix> T* mutable_data(Ix&&... index) {
+        return static_cast<T*>(array::mutable_data(index...));
+    }
+
+    // Reference to element at a given index
+    template<typename... Ix> const T& at(Ix&&... index) const {
+        if (sizeof...(index) != ndim())
+            fail_dim_check(sizeof...(index), "index dimension mismatch");
+        // not using offset_at() / index_at() here so as to avoid another dimension check
+        return *(static_cast<const T*>(array::data()) + get_byte_offset(index...) / itemsize());
+    }
+
+    // Mutable reference to element at a given index
+    template<typename... Ix> T& mutable_at(Ix&&... index) {
+        if (sizeof...(index) != ndim())
+            fail_dim_check(sizeof...(index), "index dimension mismatch");
+        // not using offset_at() / index_at() here so as to avoid another dimension check
+        return *(static_cast<T*>(array::mutable_data()) + get_byte_offset(index...) / itemsize());
+    }
+
     static bool is_non_null(PyObject *ptr) { return ptr != nullptr; }
+
     static PyObject *ensure(PyObject *ptr) {
         if (ptr == nullptr)
             return nullptr;
-        API &api = lookup_api();
-        PyObject *descr = api.PyArray_DescrFromType_(detail::npy_format_descriptor<T>::value);
-        PyObject *result = api.PyArray_FromAny_(ptr, descr, 0, 0, API::NPY_ENSURE_ARRAY_ | ExtraFlags, nullptr);
+        auto& api = detail::npy_api::get();
+        PyObject *result = api.PyArray_FromAny_(ptr, pybind11::dtype::of<T>().release().ptr(), 0, 0,
+                                                detail::npy_api::NPY_ENSURE_ARRAY_ | ExtraFlags, nullptr);
         if (!result)
             PyErr_Clear();
         Py_DECREF(ptr);
@@ -144,15 +485,50 @@ public:
     }
 };
 
+template <typename T>
+struct format_descriptor<T, typename std::enable_if<detail::is_pod_struct<T>::value>::type> {
+    static std::string format() {
+        return detail::npy_format_descriptor<typename std::remove_cv<T>::type>::format();
+    }
+};
+
+template <size_t N> struct format_descriptor<char[N]> {
+    static std::string format() { return std::to_string(N) + "s"; }
+};
+template <size_t N> struct format_descriptor<std::array<char, N>> {
+    static std::string format() { return std::to_string(N) + "s"; }
+};
+
 NAMESPACE_BEGIN(detail)
+template <typename T> struct is_std_array : std::false_type { };
+template <typename T, size_t N> struct is_std_array<std::array<T, N>> : std::true_type { };
+
+template <typename T>
+struct is_pod_struct {
+    enum { value = std::is_pod<T>::value && // offsetof only works correctly for POD types
+           !std::is_reference<T>::value &&
+           !std::is_array<T>::value &&
+           !is_std_array<T>::value &&
+           !std::is_integral<T>::value &&
+           !std::is_same<typename std::remove_cv<T>::type, float>::value &&
+           !std::is_same<typename std::remove_cv<T>::type, double>::value &&
+           !std::is_same<typename std::remove_cv<T>::type, bool>::value &&
+           !std::is_same<typename std::remove_cv<T>::type, std::complex<float>>::value &&
+           !std::is_same<typename std::remove_cv<T>::type, std::complex<double>>::value };
+};
 
 template <typename T> struct npy_format_descriptor<T, typename std::enable_if<std::is_integral<T>::value>::type> {
 private:
     constexpr static const int values[8] = {
-        array::API::NPY_BYTE_, array::API::NPY_UBYTE_, array::API::NPY_SHORT_,    array::API::NPY_USHORT_,
-        array::API::NPY_INT_,  array::API::NPY_UINT_,  array::API::NPY_LONGLONG_, array::API::NPY_ULONGLONG_ };
+        npy_api::NPY_BYTE_, npy_api::NPY_UBYTE_, npy_api::NPY_SHORT_,    npy_api::NPY_USHORT_,
+        npy_api::NPY_INT_,  npy_api::NPY_UINT_,  npy_api::NPY_LONGLONG_, npy_api::NPY_ULONGLONG_ };
 public:
     enum { value = values[detail::log2(sizeof(T)) * 2 + (std::is_unsigned<T>::value ? 1 : 0)] };
+    static pybind11::dtype dtype() {
+        if (auto ptr = npy_api::get().PyArray_DescrFromType_(value))
+            return object(ptr, true);
+        pybind11_fail("Unsupported buffer format!");
+    }
     template <typename T2 = T, typename std::enable_if<std::is_signed<T2>::value, int>::type = 0>
     static PYBIND11_DESCR name() { return _("int") + _<sizeof(T)*8>(); }
     template <typename T2 = T, typename std::enable_if<!std::is_signed<T2>::value, int>::type = 0>
@@ -162,11 +538,149 @@ template <typename T> constexpr const int npy_format_descriptor<
     T, typename std::enable_if<std::is_integral<T>::value>::type>::values[8];
 
 #define DECL_FMT(Type, NumPyName, Name) template<> struct npy_format_descriptor<Type> { \
-    enum { value = array::API::NumPyName }; \
+    enum { value = npy_api::NumPyName }; \
+    static pybind11::dtype dtype() { \
+        if (auto ptr = npy_api::get().PyArray_DescrFromType_(value)) \
+            return object(ptr, true); \
+        pybind11_fail("Unsupported buffer format!"); \
+    } \
     static PYBIND11_DESCR name() { return _(Name); } }
-DECL_FMT(float, NPY_FLOAT_, "float32"); DECL_FMT(double, NPY_DOUBLE_, "float64"); DECL_FMT(bool, NPY_BOOL_, "bool");
-DECL_FMT(std::complex<float>, NPY_CFLOAT_, "complex64"); DECL_FMT(std::complex<double>, NPY_CDOUBLE_, "complex128");
+DECL_FMT(float, NPY_FLOAT_, "float32");
+DECL_FMT(double, NPY_DOUBLE_, "float64");
+DECL_FMT(bool, NPY_BOOL_, "bool");
+DECL_FMT(std::complex<float>, NPY_CFLOAT_, "complex64");
+DECL_FMT(std::complex<double>, NPY_CDOUBLE_, "complex128");
 #undef DECL_FMT
+
+#define DECL_CHAR_FMT \
+    static PYBIND11_DESCR name() { return _("S") + _<N>(); } \
+    static pybind11::dtype dtype() { return std::string("S") + std::to_string(N); }
+template <size_t N> struct npy_format_descriptor<char[N]> { DECL_CHAR_FMT };
+template <size_t N> struct npy_format_descriptor<std::array<char, N>> { DECL_CHAR_FMT };
+#undef DECL_CHAR_FMT
+
+struct field_descriptor {
+    const char *name;
+    size_t offset;
+    size_t size;
+    std::string format;
+    dtype descr;
+};
+
+template <typename T>
+struct npy_format_descriptor<T, typename std::enable_if<is_pod_struct<T>::value>::type> {
+    static PYBIND11_DESCR name() { return _("struct"); }
+
+    static pybind11::dtype dtype() {
+        if (!dtype_ptr)
+            pybind11_fail("NumPy: unsupported buffer format!");
+        return object(dtype_ptr, true);
+    }
+
+    static std::string format() {
+        if (!dtype_ptr)
+            pybind11_fail("NumPy: unsupported buffer format!");
+        return format_str;
+    }
+
+    static void register_dtype(std::initializer_list<field_descriptor> fields) {
+        list names, formats, offsets;
+        for (auto field : fields) {
+            if (!field.descr)
+                pybind11_fail("NumPy: unsupported field dtype");
+            names.append(PYBIND11_STR_TYPE(field.name));
+            formats.append(field.descr);
+            offsets.append(pybind11::int_(field.offset));
+        }
+        dtype_ptr = pybind11::dtype(names, formats, offsets, sizeof(T)).release().ptr();
+
+        // There is an existing bug in NumPy (as of v1.11): trailing bytes are
+        // not encoded explicitly into the format string. This will supposedly
+        // get fixed in v1.12; for further details, see these:
+        // - https://github.com/numpy/numpy/issues/7797
+        // - https://github.com/numpy/numpy/pull/7798
+        // Because of this, we won't use numpy's logic to generate buffer format
+        // strings and will just do it ourselves.
+        std::vector<field_descriptor> ordered_fields(fields);
+        std::sort(ordered_fields.begin(), ordered_fields.end(),
+                  [](const field_descriptor& a, const field_descriptor &b) {
+                      return a.offset < b.offset;
+                  });
+        size_t offset = 0;
+        std::ostringstream oss;
+        oss << "T{";
+        for (auto& field : ordered_fields) {
+            if (field.offset > offset)
+                oss << (field.offset - offset) << 'x';
+            // note that '=' is required to cover the case of unaligned fields
+            oss << '=' << field.format << ':' << field.name << ':';
+            offset = field.offset + field.size;
+        }
+        if (sizeof(T) > offset)
+            oss << (sizeof(T) - offset) << 'x';
+        oss << '}';
+        format_str = oss.str();
+
+        // Sanity check: verify that NumPy properly parses our buffer format string
+        auto& api = npy_api::get();
+        auto arr =  array(buffer_info(nullptr, sizeof(T), format(), 1));
+        if (!api.PyArray_EquivTypes_(dtype_ptr, arr.dtype().ptr()))
+            pybind11_fail("NumPy: invalid buffer descriptor!");
+    }
+
+private:
+    static std::string format_str;
+    static PyObject* dtype_ptr;
+};
+
+template <typename T>
+std::string npy_format_descriptor<T, typename std::enable_if<is_pod_struct<T>::value>::type>::format_str;
+template <typename T>
+PyObject* npy_format_descriptor<T, typename std::enable_if<is_pod_struct<T>::value>::type>::dtype_ptr = nullptr;
+
+// Extract name, offset and format descriptor for a struct field
+#define PYBIND11_FIELD_DESCRIPTOR(Type, Field) \
+    ::pybind11::detail::field_descriptor { \
+        #Field, offsetof(Type, Field), sizeof(decltype(static_cast<Type*>(0)->Field)), \
+        ::pybind11::format_descriptor<decltype(static_cast<Type*>(0)->Field)>::format(), \
+        ::pybind11::detail::npy_format_descriptor<decltype(static_cast<Type*>(0)->Field)>::dtype() \
+    }
+
+// The main idea of this macro is borrowed from https://github.com/swansontec/map-macro
+// (C) William Swanson, Paul Fultz
+#define PYBIND11_EVAL0(...) __VA_ARGS__
+#define PYBIND11_EVAL1(...) PYBIND11_EVAL0 (PYBIND11_EVAL0 (PYBIND11_EVAL0 (__VA_ARGS__)))
+#define PYBIND11_EVAL2(...) PYBIND11_EVAL1 (PYBIND11_EVAL1 (PYBIND11_EVAL1 (__VA_ARGS__)))
+#define PYBIND11_EVAL3(...) PYBIND11_EVAL2 (PYBIND11_EVAL2 (PYBIND11_EVAL2 (__VA_ARGS__)))
+#define PYBIND11_EVAL4(...) PYBIND11_EVAL3 (PYBIND11_EVAL3 (PYBIND11_EVAL3 (__VA_ARGS__)))
+#define PYBIND11_EVAL(...)  PYBIND11_EVAL4 (PYBIND11_EVAL4 (PYBIND11_EVAL4 (__VA_ARGS__)))
+#define PYBIND11_MAP_END(...)
+#define PYBIND11_MAP_OUT
+#define PYBIND11_MAP_COMMA ,
+#define PYBIND11_MAP_GET_END() 0, PYBIND11_MAP_END
+#define PYBIND11_MAP_NEXT0(test, next, ...) next PYBIND11_MAP_OUT
+#define PYBIND11_MAP_NEXT1(test, next) PYBIND11_MAP_NEXT0 (test, next, 0)
+#define PYBIND11_MAP_NEXT(test, next)  PYBIND11_MAP_NEXT1 (PYBIND11_MAP_GET_END test, next)
+#ifdef _MSC_VER // MSVC is not as eager to expand macros, hence this workaround
+#define PYBIND11_MAP_LIST_NEXT1(test, next) \
+    PYBIND11_EVAL0 (PYBIND11_MAP_NEXT0 (test, PYBIND11_MAP_COMMA next, 0))
+#else
+#define PYBIND11_MAP_LIST_NEXT1(test, next) \
+    PYBIND11_MAP_NEXT0 (test, PYBIND11_MAP_COMMA next, 0)
+#endif
+#define PYBIND11_MAP_LIST_NEXT(test, next) \
+    PYBIND11_MAP_LIST_NEXT1 (PYBIND11_MAP_GET_END test, next)
+#define PYBIND11_MAP_LIST0(f, t, x, peek, ...) \
+    f(t, x) PYBIND11_MAP_LIST_NEXT (peek, PYBIND11_MAP_LIST1) (f, t, peek, __VA_ARGS__)
+#define PYBIND11_MAP_LIST1(f, t, x, peek, ...) \
+    f(t, x) PYBIND11_MAP_LIST_NEXT (peek, PYBIND11_MAP_LIST0) (f, t, peek, __VA_ARGS__)
+// PYBIND11_MAP_LIST(f, t, a1, a2, ...) expands to f(t, a1), f(t, a2), ...
+#define PYBIND11_MAP_LIST(f, t, ...) \
+    PYBIND11_EVAL (PYBIND11_MAP_LIST1 (f, t, __VA_ARGS__, (), 0))
+
+#define PYBIND11_NUMPY_DTYPE(Type, ...) \
+    ::pybind11::detail::npy_format_descriptor<Type>::register_dtype \
+        ({PYBIND11_MAP_LIST (PYBIND11_FIELD_DESCRIPTOR, Type, __VA_ARGS__)})
 
 template  <class T>
 using array_iterator = typename std::add_pointer<T>::type;
@@ -347,16 +861,13 @@ struct vectorize_helper {
         if (size == 1)
             return cast(f(*((Args *) buffers[Index].ptr)...));
 
-        array result(buffer_info(nullptr, sizeof(Return),
-            format_descriptor<Return>::value,
-            ndim, shape, strides));
-
-        buffer_info buf = result.request();
-        Return *output = (Return *) buf.ptr;
+        array_t<Return> result(shape, strides);
+        auto buf = result.request();
+        auto output = (Return *) buf.ptr;
 
         if (trivial_broadcast) {
             /* Call the function */
-            for (size_t i=0; i<size; ++i) {
+            for (size_t i = 0; i < size; ++i) {
                 output[i] = f((buffers[Index].size == 1
                                ? *((Args *) buffers[Index].ptr)
                                : ((Args *) buffers[Index].ptr)[i])...);
@@ -385,7 +896,7 @@ struct vectorize_helper {
 };
 
 template <typename T, int Flags> struct handle_type_name<array_t<T, Flags>> {
-    static PYBIND11_DESCR name() { return _("numpy.ndarray[dtype=") + type_caster<T>::name() + _("]"); }
+    static PYBIND11_DESCR name() { return _("numpy.ndarray[") + type_caster<T>::name() + _("]"); }
 };
 
 NAMESPACE_END(detail)

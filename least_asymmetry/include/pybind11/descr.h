@@ -15,8 +15,9 @@
 NAMESPACE_BEGIN(pybind11)
 NAMESPACE_BEGIN(detail)
 
-
-#if defined(__clang__)
+#if defined(__INTEL_COMPILER)
+/* C++14 features not supported for now */
+#elif defined(__clang__)
 #  if __has_feature(cxx_return_type_deduction) && __has_feature(cxx_relaxed_constexpr)
 #    define PYBIND11_CPP14
 #  endif
@@ -181,7 +182,7 @@ PYBIND11_NOINLINE inline descr concat(descr &&d) { return d; }
 template <typename... Args> PYBIND11_NOINLINE descr concat(descr &&d, Args&&... args) { return std::move(d) + _(", ") + concat(std::forward<Args>(args)...); }
 PYBIND11_NOINLINE inline descr type_descr(descr&& d) { return _("{") + std::move(d) + _("}"); }
 
-#define PYBIND11_DESCR descr
+#define PYBIND11_DESCR ::pybind11::detail::descr
 #endif
 
 NAMESPACE_END(detail)
