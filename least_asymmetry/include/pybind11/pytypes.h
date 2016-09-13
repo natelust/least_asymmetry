@@ -16,7 +16,8 @@
 NAMESPACE_BEGIN(pybind11)
 
 /* A few forward declarations */
-class object; class str; class object; class dict; class iterator;
+class object; class str; class iterator;
+struct arg; struct arg_v;
 namespace detail { class accessor; class args_proxy; class kwargs_proxy; }
 
 /// Holds a reference to a Python object (no reference counting)
@@ -38,6 +39,8 @@ public:
     inline detail::accessor attr(handle key) const;
     inline detail::accessor attr(const char *key) const;
     inline pybind11::str str() const;
+    inline pybind11::str repr() const;
+    bool is_none() const { return m_ptr == Py_None; }
     template <typename T> T cast() const;
     template <return_value_policy policy = return_value_policy::automatic_reference, typename ... Args>
     #if __cplusplus > 201103L
@@ -46,8 +49,6 @@ public:
     object call(Args&&... args) const;
     template <return_value_policy policy = return_value_policy::automatic_reference, typename ... Args>
     object operator()(Args&&... args) const;
-    inline object operator()(detail::args_proxy args) const;
-    inline object operator()(detail::args_proxy f_args, detail::kwargs_proxy kwargs) const;
     operator bool() const { return m_ptr != nullptr; }
     bool operator==(const handle &h) const { return m_ptr == h.m_ptr; }
     bool operator!=(const handle &h) const { return m_ptr != h.m_ptr; }
@@ -89,6 +90,11 @@ public:
         }
         return *this;
     }
+
+    // Calling cast() on an object lvalue just copies (via handle::cast)
+    template <typename T> T cast() const &;
+    // Calling on an object rvalue does a move, if needed and/or possible
+    template <typename T> T cast() &&;
 };
 
 NAMESPACE_BEGIN(detail)
@@ -117,10 +123,10 @@ public:
     void operator=(const handle &value) {
         if (attr) {
             if (PyObject_SetAttr(obj.ptr(), key.ptr(), value.ptr()) == -1)
-                pybind11_fail("Unable to set object attribute");
+                throw error_already_set();
         } else {
             if (PyObject_SetItem(obj.ptr(), key.ptr(), value.ptr()) == -1)
-                pybind11_fail("Unable to set object item");
+                throw error_already_set();
         }
     }
 
@@ -243,6 +249,23 @@ public:
     kwargs_proxy operator*() const { return kwargs_proxy(*this); }
 };
 
+/// Python argument categories (using PEP 448 terms)
+template <typename T> using is_keyword = std::is_base_of<arg, T>;
+template <typename T> using is_s_unpacking = std::is_same<args_proxy, T>; // * unpacking
+template <typename T> using is_ds_unpacking = std::is_same<kwargs_proxy, T>; // ** unpacking
+template <typename T> using is_positional = bool_constant<
+    !is_keyword<T>::value && !is_s_unpacking<T>::value && !is_ds_unpacking<T>::value
+>;
+template <typename T> using is_keyword_or_ds = bool_constant<
+    is_keyword<T>::value || is_ds_unpacking<T>::value
+>;
+
+// Call argument collector forward declarations
+template <return_value_policy policy = return_value_policy::automatic_reference>
+class simple_collector;
+template <return_value_policy policy = return_value_policy::automatic_reference>
+class unpacking_collector;
+
 NAMESPACE_END(detail)
 
 #define PYBIND11_OBJECT_CVT(Name, Parent, CheckFun, CvtStmt) \
@@ -334,12 +357,14 @@ inline iterator handle::begin() const { return iterator(PyObject_GetIter(ptr()),
 inline iterator handle::end() const { return iterator(nullptr, false); }
 inline detail::args_proxy handle::operator*() const { return detail::args_proxy(*this); }
 
+class bytes;
+
 class str : public object {
 public:
     PYBIND11_OBJECT_DEFAULT(str, object, detail::PyUnicode_Check_Permissive)
 
-    str(const std::string &s)
-        : object(PyUnicode_FromStringAndSize(s.c_str(), (ssize_t) s.length()), false) {
+    str(const char *c, size_t n)
+    : object(PyUnicode_FromStringAndSize(c, (ssize_t) n), false) {
         if (!m_ptr) pybind11_fail("Could not allocate string object!");
     }
 
@@ -347,6 +372,10 @@ public:
         : object(PyUnicode_FromString(c), false) {
         if (!m_ptr) pybind11_fail("Could not allocate string object!");
     }
+
+    str(const std::string &s) : str(s.data(), s.size()) { }
+
+    str(const bytes &b);
 
     operator std::string() const {
         object temp = *this;
@@ -357,15 +386,33 @@ public:
         }
         char *buffer;
         ssize_t length;
-        int err = PYBIND11_BYTES_AS_STRING_AND_SIZE(temp.ptr(), &buffer, &length);
-        if (err == -1)
+        if (PYBIND11_BYTES_AS_STRING_AND_SIZE(temp.ptr(), &buffer, &length))
             pybind11_fail("Unable to extract string contents! (invalid type)");
         return std::string(buffer, (size_t) length);
     }
+
+    template <typename... Args>
+    str format(Args &&...args) const {
+        return attr("format").cast<object>()(std::forward<Args>(args)...);
+    }
 };
+
+inline namespace literals {
+/// String literal version of str
+inline str operator"" _s(const char *s, size_t size) { return {s, size}; }
+}
 
 inline pybind11::str handle::str() const {
     PyObject *strValue = PyObject_Str(m_ptr);
+#if PY_MAJOR_VERSION < 3
+    PyObject *unicode = PyUnicode_FromEncodedObject(strValue, "utf-8", nullptr);
+    Py_XDECREF(strValue); strValue = unicode;
+#endif
+    return pybind11::str(strValue, false);
+}
+
+inline pybind11::str handle::repr() const {
+    PyObject *strValue = PyObject_Repr(m_ptr);
 #if PY_MAJOR_VERSION < 3
     PyObject *unicode = PyUnicode_FromEncodedObject(strValue, "utf-8", nullptr);
     Py_XDECREF(strValue); strValue = unicode;
@@ -377,20 +424,56 @@ class bytes : public object {
 public:
     PYBIND11_OBJECT_DEFAULT(bytes, object, PYBIND11_BYTES_CHECK)
 
-    bytes(const std::string &s)
-        : object(PYBIND11_BYTES_FROM_STRING_AND_SIZE(s.data(), (ssize_t) s.size()), false) {
+    bytes(const char *c)
+    : object(PYBIND11_BYTES_FROM_STRING(c), false) {
         if (!m_ptr) pybind11_fail("Could not allocate bytes object!");
     }
+
+    bytes(const char *c, size_t n)
+    : object(PYBIND11_BYTES_FROM_STRING_AND_SIZE(c, (ssize_t) n), false) {
+        if (!m_ptr) pybind11_fail("Could not allocate bytes object!");
+    }
+
+    bytes(const std::string &s) : bytes(s.data(), s.size()) { }
+
+    bytes(const pybind11::str &s);
 
     operator std::string() const {
         char *buffer;
         ssize_t length;
-        int err = PYBIND11_BYTES_AS_STRING_AND_SIZE(m_ptr, &buffer, &length);
-        if (err == -1)
+        if (PYBIND11_BYTES_AS_STRING_AND_SIZE(m_ptr, &buffer, &length))
             pybind11_fail("Unable to extract bytes contents!");
         return std::string(buffer, (size_t) length);
     }
 };
+
+inline bytes::bytes(const pybind11::str &s) {
+    object temp = s;
+    if (PyUnicode_Check(s.ptr())) {
+        temp = object(PyUnicode_AsUTF8String(s.ptr()), false);
+        if (!temp)
+            pybind11_fail("Unable to extract string contents! (encoding issue)");
+    }
+    char *buffer;
+    ssize_t length;
+    if (PYBIND11_BYTES_AS_STRING_AND_SIZE(temp.ptr(), &buffer, &length))
+        pybind11_fail("Unable to extract string contents! (invalid type)");
+    auto obj = object(PYBIND11_BYTES_FROM_STRING_AND_SIZE(buffer, length), false);
+    if (!obj)
+        pybind11_fail("Could not allocate bytes object!");
+    m_ptr = obj.release().ptr();
+}
+
+inline str::str(const bytes& b) {
+    char *buffer;
+    ssize_t length;
+    if (PYBIND11_BYTES_AS_STRING_AND_SIZE(b.ptr(), &buffer, &length))
+        pybind11_fail("Unable to extract bytes contents!");
+    auto obj = object(PyUnicode_FromStringAndSize(buffer, (ssize_t) length), false);
+    if (!obj)
+        pybind11_fail("Could not allocate string object!");
+    m_ptr = obj.release().ptr();
+}
 
 class none : public object {
 public:
@@ -511,6 +594,12 @@ public:
     dict() : object(PyDict_New(), false) {
         if (!m_ptr) pybind11_fail("Could not allocate dict object!");
     }
+    template <typename... Args,
+              typename = detail::enable_if_t<detail::all_of_t<detail::is_keyword_or_ds, Args...>::value>,
+              // MSVC workaround: it can't compile an out-of-line definition, so defer the collector
+              typename collector = detail::deferred_t<detail::unpacking_collector<>, Args...>>
+    dict(Args &&...args) : dict(collector(std::forward<Args>(args)...).kwargs()) { }
+
     size_t size() const { return (size_t) PyDict_Size(m_ptr); }
     detail::dict_iterator begin() const { return (++detail::dict_iterator(*this, 0)); }
     detail::dict_iterator end() const { return detail::dict_iterator(); }
@@ -563,6 +652,38 @@ public:
             throw error_already_set();
         return buffer_info(view);
     }
+};
+
+class memoryview : public object {
+public:
+    memoryview(const buffer_info& info) {
+        static Py_buffer buf { };
+        // Py_buffer uses signed sizes, strides and shape!..
+        static std::vector<Py_ssize_t> py_strides { };
+        static std::vector<Py_ssize_t> py_shape { };
+        buf.buf = info.ptr;
+        buf.itemsize = (Py_ssize_t) info.itemsize;
+        buf.format = const_cast<char *>(info.format.c_str());
+        buf.ndim = (int) info.ndim;
+        buf.len = (Py_ssize_t) info.size;
+        py_strides.clear();
+        py_shape.clear();
+        for (size_t i = 0; i < info.ndim; ++i) {
+            py_strides.push_back((Py_ssize_t) info.strides[i]);
+            py_shape.push_back((Py_ssize_t) info.shape[i]);
+        }
+        buf.strides = py_strides.data();
+        buf.shape = py_shape.data();
+        buf.suboffsets = nullptr;
+        buf.readonly = false;
+        buf.internal = nullptr;
+
+        m_ptr = PyMemoryView_FromBuffer(&buf);
+        if (!m_ptr)
+            pybind11_fail("Unable to create memoryview from buffer descriptor");
+    }
+
+    PYBIND11_OBJECT_DEFAULT(memoryview, object, PyMemoryView_Check)
 };
 
 inline size_t len(handle h) {

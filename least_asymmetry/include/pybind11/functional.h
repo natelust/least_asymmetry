@@ -20,6 +20,9 @@ template <typename Return, typename... Args> struct type_caster<std::function<Re
     typedef typename std::conditional<std::is_same<Return, void>::value, void_type, Return>::type retval_type;
 public:
     bool load(handle src_, bool) {
+        if (src_.is_none())
+            return true;
+
         src_ = detail::get_function(src_);
         if (!src_ || !PyCallable_Check(src_.ptr()))
             return false;
@@ -58,6 +61,9 @@ public:
 
     template <typename Func>
     static handle cast(Func &&f_, return_value_policy policy, handle /* parent */) {
+        if (!f_)
+            return none().inc_ref();
+
         auto result = f_.template target<Return (*)(Args...)>();
         if (result)
             return cpp_function(*result, policy).release();
@@ -65,10 +71,10 @@ public:
             return cpp_function(std::forward<Func>(f_), policy).release();
     }
 
-    PYBIND11_TYPE_CASTER(type, _("function<") +
-            type_caster<std::tuple<Args...>>::name() + _(" -> ") +
+    PYBIND11_TYPE_CASTER(type, _("Callable[[") +
+            type_caster<std::tuple<Args...>>::element_names() + _("], ") +
             type_caster<retval_type>::name() +
-            _(">"));
+            _("]"));
 };
 
 NAMESPACE_END(detail)
