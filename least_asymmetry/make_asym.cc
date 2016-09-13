@@ -39,7 +39,7 @@ static double make_asym_func(
     // radii that corresponds to, and use that to construct a vector of arrays
     // to contain the results of calcuations for each radial bin
     int halfSize = (data.shape[0]-1)/2;
-    int equationDim = (halfSize+1)*halfSize/2+halfSize;
+    int equationDim = (halfSize+1)*halfSize/2+halfSize+1;
     std::vector<std::array<double, 5> > EquationArray(equationDim);
     // Enumerate the indicies for the array corresponding to each radii for
     // more readable code
