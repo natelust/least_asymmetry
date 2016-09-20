@@ -63,7 +63,7 @@ def fitgaussian(data, weights=False):
 
 
 def col(data, weights=False):
-    if isinstance(type(weights), type(False)):
+    if isinstance(weights, type(False)):
         weights = np.ones(data.shape, dtype=float)
     elif weights.dtype != np.dtype('float'):
         weights = np.array(weights, dtype=float)
@@ -356,8 +356,8 @@ def actr(data, yxguess, asym_rad=8, asym_size=5, maxcounts=2, method='gaus',
 
         # now find the sub pixel position using the given method
         if method == 'col':
-            return ((np.array(col(asym)))/divisor - asym_size) + \
-                   np.array((suby[middle], subx[middle]), dtype=float)
+            return [((np.array(col(asym)))/divisor - asym_size) + \
+                   np.array((suby[middle], subx[middle]), dtype=float), asym]
         if method == 'gaus':
             return [((np.array(fitgaussian(asym)[[1, 2]]))/divisor -
                      asym_size)+np.array((suby[middle], subx[middle]),
