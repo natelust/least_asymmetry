@@ -81,17 +81,17 @@ extra_files = package_files('least_asymmetry/include/')
 
 setup(
     name='least_asymmetry',
-    version='0.37',
+    version='0.38',
     author='Nate Lust',
     author_email='nlust@astro.princeton.edu',
     description='A module for calculating centers though least asymmetry',
     packages=['least_asymmetry'],
-    package_data={"", extra_files,},
+    package_data={"": extra_files,},
     ext_modules=ext_modules,
     cmdclass={'build_ext': BuildExt},
     zip_safe=False,
     url='https://github.com/natelust/least_asymmetry',
-    download_url='https://github.com/natelust/least_asymmetry/archive/0.37.tar.gz',
+    download_url='https://github.com/natelust/least_asymmetry/archive/0.38.tar.gz',
     keywords=['astronomy', 'centering', 'astrophysics', 'centroid', 'least asymmetry'],
     classifiers=[],
 )
