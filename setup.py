@@ -79,4 +79,8 @@ setup(
     ext_modules=ext_modules,
     cmdclass={'build_ext': BuildExt},
     zip_safe=False,
+    url='https://github.com/natelust/least_asymmetry',
+    download_url='https://github.com/natelust/least_asymmetry/archive/0.3.tar.gz',
+    keywords=['astronomy', 'centering', 'astrophysics', 'centroid', 'least asymmetry'],
+    classifiers=[],
 )
