@@ -69,18 +69,28 @@ class BuildExt(build_ext):
             ext.extra_compile_args = opts
         build_ext.build_extensions(self)
 
+def package_files(directory):
+    paths = []
+    for (path, directories, filenames) in os.walk(directory):
+        for filename in filenames:
+            paths.append(os.path.join('..', path, filename))
+    return paths
+
+extra_files = package_files('least_asymmetry/include/')
+
 setup(
     name='least_asymmetry',
-    version='0.35',
+    version='0.36',
     author='Nate Lust',
     author_email='nlust@astro.princeton.edu',
     description='A module for calculating centers though least asymmetry',
     packages=['least_asymmetry'],
+    package_data={"", extra_files,},
     ext_modules=ext_modules,
     cmdclass={'build_ext': BuildExt},
     zip_safe=False,
     url='https://github.com/natelust/least_asymmetry',
-    download_url='https://github.com/natelust/least_asymmetry/archive/0.35.tar.gz',
+    download_url='https://github.com/natelust/least_asymmetry/archive/0.36.tar.gz',
     keywords=['astronomy', 'centering', 'astrophysics', 'centroid', 'least asymmetry'],
     classifiers=[],
 )
