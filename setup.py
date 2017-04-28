@@ -71,7 +71,7 @@ class BuildExt(build_ext):
 
 setup(
     name='least_asymmetry',
-    version='0.3',
+    version='0.35',
     author='Nate Lust',
     author_email='nlust@astro.princeton.edu',
     description='A module for calculating centers though least asymmetry',
@@ -80,7 +80,7 @@ setup(
     cmdclass={'build_ext': BuildExt},
     zip_safe=False,
     url='https://github.com/natelust/least_asymmetry',
-    download_url='https://github.com/natelust/least_asymmetry/archive/0.3.tar.gz',
+    download_url='https://github.com/natelust/least_asymmetry/archive/0.35.tar.gz',
     keywords=['astronomy', 'centering', 'astrophysics', 'centroid', 'least asymmetry'],
     classifiers=[],
 )
