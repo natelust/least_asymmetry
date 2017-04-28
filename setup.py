@@ -71,7 +71,7 @@ class BuildExt(build_ext):
 
 setup(
     name='least_asymmetry',
-    version='0.2',
+    version='0.3',
     author='Nate Lust',
     author_email='nlust@astro.princeton.edu',
     description='A module for calculating centers though least asymmetry',
