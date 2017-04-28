@@ -6,6 +6,7 @@ from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
 import sys
 import setuptools
+import os
 
 cpp_args = ['-std=c++11', '-stdlib=libc++', '-mmacosx-version-min=10.7']
 
@@ -80,7 +81,7 @@ extra_files = package_files('least_asymmetry/include/')
 
 setup(
     name='least_asymmetry',
-    version='0.36',
+    version='0.37',
     author='Nate Lust',
     author_email='nlust@astro.princeton.edu',
     description='A module for calculating centers though least asymmetry',
@@ -90,7 +91,7 @@ setup(
     cmdclass={'build_ext': BuildExt},
     zip_safe=False,
     url='https://github.com/natelust/least_asymmetry',
-    download_url='https://github.com/natelust/least_asymmetry/archive/0.36.tar.gz',
+    download_url='https://github.com/natelust/least_asymmetry/archive/0.37.tar.gz',
     keywords=['astronomy', 'centering', 'astrophysics', 'centroid', 'least asymmetry'],
     classifiers=[],
 )
