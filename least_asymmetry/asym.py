@@ -245,7 +245,11 @@ def actr(data, yxguess, asym_rad=8, asym_size=5, maxcounts=2, method='gaus',
         w_truth_dup = (w_truth*1 for i in ones_len)
 
         # now create the actual asym array
-        asym = np.array(list(map(make_asym, views, lb_views, w_truth_dup)))
+        try:
+            asym = np.array(list(map(make_asym, views, lb_views, w_truth_dup)))
+        except RuntimeError as e:
+            raise RuntimeError("Error in computing asym transformation, "
+                               "check input image for defects")
 
         # need to find out if the minimum is in the center of the array if it
         # is, break
