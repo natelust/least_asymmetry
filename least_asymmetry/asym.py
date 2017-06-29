@@ -195,6 +195,10 @@ def actr(data, yxguess, asym_rad=8, asym_size=5, maxcounts=2, method='gaus',
     x_guess = int(yxguess[1])
     y_guess = int(yxguess[0])
 
+    # make sure asym_size and asym_rad are ints
+    asym_size = int(asym_size)
+    asym_rad  = int(asym_rad)
+    
     # create the array indexes
     ny, nx = np.indices((data.shape))
 
@@ -361,10 +365,12 @@ def actr(data, yxguess, asym_rad=8, asym_size=5, maxcounts=2, method='gaus',
         # now find the sub pixel position using the given method
         if method == 'col':
             return [((np.array(col(asym)))/divisor - asym_size) + \
-                   np.array((suby[middle], subx[middle]), dtype=float), asym]
+                   np.array((suby[int(middle)], subx[int(middle)]),
+                            dtype=float), asym]
         if method == 'gaus':
             return [((np.array(fitgaussian(asym)[[1, 2]]))/divisor -
-                     asym_size)+np.array((suby[middle], subx[middle]),
+                     asym_size)+np.array((suby[int(middle)],
+                                          subx[int(middle)]),
                                          dtype=float), asym]
 
     else:
